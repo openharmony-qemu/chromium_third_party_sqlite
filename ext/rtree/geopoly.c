@@ -26,11 +26,7 @@
 # define GEODEBUG(X)
 #endif
 
-#ifndef JSON_NULL   /* The following stuff repeats things found in json1 */
-/*
-** Versions of isspace(), isalnum() and isdigit() to which it is safe
-** to pass signed char values.
-*/
+/* Character class routines */
 #ifdef sqlite3Isdigit
    /* Use the SQLite core versions if this routine is part of the
    ** SQLite amalgamation */
@@ -45,6 +41,7 @@
 #  define safe_isxdigit(x) isxdigit((unsigned char)(x))
 #endif
 
+#ifndef JSON_NULL   /* The following stuff repeats things found in json1 */
 /*
 ** Growing our own isspace() routine this way is twice as fast as
 ** the library isspace() function.
@@ -67,7 +64,7 @@ static const char geopolyIsSpace[] = {
   0, 0, 0, 0, 0, 0, 0, 0,     0, 0, 0, 0, 0, 0, 0, 0,
   0, 0, 0, 0, 0, 0, 0, 0,     0, 0, 0, 0, 0, 0, 0, 0,
 };
-#define safe_isspace(x) (geopolyIsSpace[(unsigned char)x])
+#define fast_isspace(x) (geopolyIsSpace[(unsigned char)x])
 #endif /* JSON NULL - back to original code */
 
 /* Compiler and version */
@@ -156,7 +153,7 @@ static void geopolySwab32(unsigned char *a){
 
 /* Skip whitespace.  Return the next non-whitespace character. */
 static char geopolySkipSpace(GeoParse *p){
-  while( safe_isspace(p->z[0]) ) p->z++;
+  while( fast_isspace(p->z[0]) ) p->z++;
   return p->z[0];
 }
 
@@ -1698,7 +1695,7 @@ static int geopolyUpdate(
       sqlite3_free(p);
       nChange = 1;
     }
-    for(jj=1; jj<pRtree->nAux; jj++){
+    for(jj=1; jj<nData-2; jj++){
       nChange++;
       sqlite3_bind_value(pUp, jj+2, aData[jj+2]);
     }
