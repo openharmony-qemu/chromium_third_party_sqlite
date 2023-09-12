@@ -1,6 +1,6 @@
 [
     {
-        "Name": "chromium_third_party_sqlite",                   # 上游开源软件名全称
+        "Name": "sqlite",                   # 上游开源软件名全称
         "License": "GPLStyleLicense"      # 上游开源软件中包含的许可证信息
         "License File": "LICENSE.md"    # 许可证所在文件路径
         "Version Number": "9ccd3058ec6dcfa5b0ebd2edb3e88c9b97813025",
@@ -8,7 +8,7 @@
         "Description": "第三方软件sqlite"           # 开源软件功能描述
     },
     {
-        "Name": "chromium_third_party_sqlite",                   # 上游开源软件名全称
+        "Name": "sqlite",                   # 上游开源软件名全称
         "License":"Philippe De Muyter Licenser"     # 上游开源软件中包含的许可证信息
         "License File": "LICENSE.md"    # 许可证所在文件路径
         "Version Number": "9ccd3058ec6dcfa5b0ebd2edb3e88c9b97813025",
@@ -16,7 +16,7 @@
         "Description": "第三方软件sqlite"           # 开源软件功能描述
     },
     {
-        "Name": "chromium_third_party_sqlite",                   # 上游开源软件名全称
+        "Name": "sqlite",                   # 上游开源软件名全称
         "License": "FSFAP"     # 上游开源软件中包含的许可证信息
         "License File": "LICENSE.md"    # 许可证所在文件路径
         "Version Number": "9ccd3058ec6dcfa5b0ebd2edb3e88c9b97813025",
@@ -24,7 +24,7 @@
         "Description": "第三方软件sqlite"           # 开源软件功能描述
     },
     {
-        "Name": "chromium_third_party_sqlite",                   # 上游开源软件名全称
+        "Name": "sqlite",                   # 上游开源软件名全称
         "License":"GPL-3.0-or-later"     # 上游开源软件中包含的许可证信息
         "License File": "LICENSE.md"    # 许可证所在文件路径
         "Version Number": "9ccd3058ec6dcfa5b0ebd2edb3e88c9b97813025",
@@ -32,7 +32,7 @@
         "Description": "第三方软件sqlite"           # 开源软件功能描述
     },
     {
-        "Name": "chromium_third_party_sqlite",                   # 上游开源软件名全称
+        "Name": "sqlite",                   # 上游开源软件名全称
         "License":"Philippe De Muyter Licenser"      # 上游开源软件中包含的许可证信息
         "License File": "LICENSE.md"    # 许可证所在文件路径
         "Version Number": "9ccd3058ec6dcfa5b0ebd2edb3e88c9b97813025",
