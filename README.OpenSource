@@ -6,6 +6,6 @@
         "Version Number": "9ccd3058ec6dcfa5b0ebd2edb3e88c9b97813025",
         "Owner": "huangjiewen2@huawei.com",
         "Upstream URL": "https://chromium.googlesource.com/chromium/deps/sqlite.git@9ccd3058ec6dcfa5b0ebd2edb3e88c9b97813025",
-        "Description": "第三方软件sqlite"
+        "Description": "第三方软件sqlite，一个进程内的库，实现了自给自足的、无服务器的、零配置的、事务性的 SQL 数据库引擎"
     }
 ]
