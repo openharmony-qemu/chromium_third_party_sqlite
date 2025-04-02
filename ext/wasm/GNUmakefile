@@ -18,8 +18,6 @@
 #  quick, q = do just a minimal build (sqlite3.js/wasm, tester1) for
 #      faster development-mode turnaround.
 #
-#  qo2, qoz = a combination of quick+o2/oz.
-#
 #  dist = create end user deliverables. Add dist.build=oX to build
 #      with a specific optimization level, where oX is one of the
 #      above-listed o? or qo? target names.
@@ -44,27 +42,56 @@
 # 1) Consolidate the code generation for sqlite3*.*js into a script
 #    which generates the makefile code, rather than using $(call) and
 #    $(eval), or at least centralize the setup of the numerous vars
-#    related to each build variant (vanilla, esm, bundler-friendly).
+#    related to each build variant $(JS_BUILD_MODES). (Update: an
+#    external script was attempted but generating properly-escaped
+#    makefile code from within a shell script is even less legible
+#    than the $(eval) indirection going on in this file.)
 #
+default: all
+#default: quick
 SHELL := $(shell which bash 2>/dev/null)
 MAKEFILE := $(lastword $(MAKEFILE_LIST))
 CLEAN_FILES :=
 DISTCLEAN_FILES := ./--dummy--
-default: all
 release: oz
 
+########################################################################
+# JS_BUILD_NAMES exists for documentation purposes only. It enumerates
+# the core build styles:
+#
+# - sqlite3 = canonical library build
+#
+# - sqlite3-wasmfs = WASMFS-capable library build
+#
+JS_BUILD_NAMES := sqlite3 sqlite3-wasmfs
+
+########################################################################
+# JS_BUILD_MODES exists for documentation purposes only. It enumerates
+# the various "flavors" of build, each of which requires slight
+# customization of the output:
+#
+# - vanilla = plain-vanilla JS for use in browsers. This is the
+#   canonical build mode.
+#
+# - esm = ES6 module, a.k.a. ESM, for use in browsers.
+#
+# - bundler-friendly = esm slightly tweaked for "bundler"
+#   tools. Bundlers are invariably based on node.js, so these builds
+#   are intended to be read at build-time by node.js but with a final
+#   target of browsers.
+#
+# - node = for use by node.js for node.js, as opposed to by node.js on
+#   behalf o browser-side code (use bundler-friendly for that). Note
+#   that persistent storage (OPFS) is not available in these builds.
+#
+JS_BUILD_MODES := vanilla esm bunder-friendly node
+
+########################################################################
 # Emscripten SDK home dir and related binaries...
 EMSDK_HOME ?= $(word 1,$(wildcard $(HOME)/emsdk $(HOME)/src/emsdk))
 emcc.bin ?= $(word 1,$(wildcard $(EMSDK_HOME)/upstream/emscripten/emcc) $(shell which emcc))
 ifeq (,$(emcc.bin))
   $(error Cannot find emcc.)
-endif
-emcc.version := $(shell "$(emcc.bin)" --version | sed -n 1p \
-                  | sed -e 's/^.* \([3-9][^ ]*\) .*$$/\1/;')
-ifeq (,$(emcc.version))
-  $(warning Cannot determine emcc version. This might unduly impact build flags.)
-else
-  $(info using emcc version [$(emcc.version)])
 endif
 emcc.version := $(shell "$(emcc.bin)" --version | sed -n 1p \
                   | sed -e 's/^.* \([3-9][^ ]*\) .*$$/\1/;')
@@ -99,11 +126,14 @@ else
   maybe-wasm-strip = $(wasm-strip)
 endif
 
+########################################################################
+# dir.top = the top dir of the canonical build tree, where
+# sqlite3.[ch] live.
 dir.top := ../..
-# Reminder: some Emscripten flags require absolute paths but we want
-# relative paths for most stuff simply to reduce noise. The
-# $(abspath...) GNU make function can transform relative paths to
-# absolute.
+# Maintenance reminder: some Emscripten flags require absolute paths
+# but we want relative paths for most stuff simply to reduce
+# noise. The $(abspath...) GNU make function can transform relative
+# paths to absolute.
 dir.wasm := $(patsubst %/,%,$(dir $(MAKEFILE)))
 dir.api := api
 dir.jacc := jaccwabyt
@@ -145,8 +175,32 @@ ifeq (,$(wildcard $(dir.tmp)))
   dir._tmp := $(shell mkdir -p $(dir.tmp))
 endif
 
-sqlite3.c := $(dir.top)/sqlite3.c
+########################################################################
+# Set up sqlite3.c and sqlite3.h...
+#
+# To build with SEE (https://sqlite.org/see), either put sqlite3-see.c
+# in $(dir.top) or pass sqlite3.c=PATH_TO_sqlite3-see.c to the $(MAKE)
+# invocation. Note that only encryption modules with no 3rd-party
+# dependencies will currently work here: AES256-OFB, AES128-OFB, and
+# AES128-CCM. Not coincidentally, those 3 modules are included in the
+# sqlite3-see.c bundle. Note, however, that distributing an SEE build
+# of the WASM on a public site is in violation of the SEE license
+# because it effectively provides a usable copy of the SEE build to
+# all visitors.
+#
+# A custom sqlite3.c must not have any spaces in its name.
+# $(sqlite3.canonical.c) must point to the sqlite3.c in
+# the sqlite3 canonical source tree, as that source file
+# is required for certain utility and test code.
+sqlite3.canonical.c := $(dir.top)/sqlite3.c
+sqlite3.c ?= $(firstword $(wildcard $(dir.top)/sqlite3-see.c) $(sqlite3.canonical.c))
 sqlite3.h := $(dir.top)/sqlite3.h
+ifeq (,$(shell grep sqlite3_activate_see $(sqlite3.c) 2>/dev/null))
+  SQLITE_C_IS_SEE := 0
+else
+  SQLITE_C_IS_SEE := 1
+  $(info This is an SEE build.)
+endif
 # Most SQLITE_OPT flags are set in sqlite3-wasm.c but we need them
 # made explicit here for building speedtest1.c.
 SQLITE_OPT = \
@@ -163,16 +217,28 @@ SQLITE_OPT = \
   -DSQLITE_OMIT_DEPRECATED \
   -DSQLITE_OMIT_UTF16 \
   -DSQLITE_OMIT_SHARED_CACHE \
-  -DSQLITE_OMIT_WAL \
   -DSQLITE_THREADSAFE=0 \
-  -DSQLITE_TEMP_STORE=3 \
+  -DSQLITE_TEMP_STORE=2 \
   -DSQLITE_OS_KV_OPTIONAL=1 \
   '-DSQLITE_DEFAULT_UNIX_VFS="unix-none"' \
   -DSQLITE_USE_URI=1 \
-  -DSQLITE_WASM_ENABLE_C_TESTS
+  -DSQLITE_WASM_ENABLE_C_TESTS \
+  -DSQLITE_C=$(sqlite3.c)
+#SQLITE_OPT += -DSQLITE_DEBUG
+# Enabling SQLITE_DEBUG will break sqlite3_wasm_vfs_create_file()
+# (and thus sqlite3_js_vfs_create_file()). Those functions are
+# deprecated and alternatives are in place, but this crash behavior
+# can be used to find errant uses of sqlite3_js_vfs_create_file()
+# in client code.
 
-$(sqlite3.c) $(sqlite3.h):
+########################################################################@
+# It's important that sqlite3.h be built to completion before any
+# other parts of the build run, thus we use .NOTPARALLEL to disable
+# parallel build of that file and its dependants.
+.NOTPARALLEL: $(sqlite3.h)
+$(sqlite3.h):
 	$(MAKE) -C $(dir.top) sqlite3.c
+$(sqlite3.c): $(sqlite3.h)
 
 .PHONY: clean distclean
 clean:
@@ -189,20 +255,57 @@ else
   $(info Development build. Use '$(MAKE) release' for a smaller release build.)
 endif
 
+########################################################################
+# Adding custom C code via sqlite3_wasm_extra_init.c:
+#
+# If the canonical build process finds the file
+# sqlite3_wasm_extra_init.c in the main wasm build directory, it
+# arranges to include that file in the build of sqlite3.wasm and
+# defines SQLITE_EXTRA_INIT=sqlite3_wasm_extra_init.
+#
+# sqlite3_wasm_extra_init() must be a function with this signature:
+#
+#  int sqlite3_wasm_extra_init(const char *)
+#
+# and the sqlite3 library will call it with an argument of NULL one
+# time during sqlite3_initialize(). If it returns non-0,
+# initialization of the library will fail.
+#
+# The filename can be overridden with:
+#
+#  make sqlite3_wasm_extra_init.c=my_custom_stuff.c
+#
+# See example_extra_init.c for an example implementation.
+########################################################################
+sqlite3_wasm_extra_init.c ?= $(wildcard sqlite3_wasm_extra_init.c)
+cflags.wasm_extra_init :=
+ifneq (,$(sqlite3_wasm_extra_init.c))
+  $(info Enabling SQLITE_EXTRA_INIT via $(sqlite3_wasm_extra_init.c).)
+  cflags.wasm_extra_init := -DSQLITE_WASM_EXTRA_INIT
+endif
+
+#########################################################################
 # bin.version-info = binary to output various sqlite3 version info for
 # embedding in the JS files and in building the distribution zip file.
 # It must NOT be in $(dir.tmp) because we need it to survive the
 # cleanup process for the dist build to work properly.
-bin.version-info := $(dir.wasm)/version-info
-$(bin.version-info): $(dir.wasm)/version-info.c $(sqlite3.h) $(MAKEFILE)
-	$(CC) -O0 -I$(dir.top) -o $@ $<
-DISTCLEAN_FILES += $(bin.version-info)
+#
+# Slight caveat: this uses the version info from the in-tree
+# sqlite3.c/h, which may diff from a user-provided $(sqlite3.c).  The
+# end result is that the generated JS files may have static version
+# info from $(bin.version-info) which differ from their runtime-emited
+# version info (e.g. from sqlite3_libversion()).
+bin.version-info := $(dir.top)/version-info
+.NOTPARALLEL: $(bin.version-info)
+$(bin.version-info): $(dir.tool)/version-info.c $(sqlite3.h) $(dir.top)/Makefile
+	$(MAKE) -C $(dir.top) version-info
 
+#########################################################################
 # bin.stripcomments is used for stripping C/C++-style comments from JS
 # files. The JS files contain large chunks of documentation which we
 # don't need for all builds. That app's -k flag is of particular
 # importance here, as it allows us to retain the opening comment
-# blocks, which contain the license header and version info.
+# block(s), which contain the license header and version info.
 bin.stripccomments := $(dir.tool)/stripccomments
 $(bin.stripccomments): $(bin.stripccomments).c $(MAKEFILE)
 	$(CC) -o $@ $<
@@ -210,8 +313,9 @@ DISTCLEAN_FILES += $(bin.stripccomments)
 
 
 ########################################################################
-# C-PP.FILTER: a $(call)able to transform $(1) to $(2) via ./c-pp -f
-# $(1) ...
+# C-PP.FILTER: a $(call)able to transform $(1) to $(2) via:
+#
+#   ./c-pp -f $(1) -o $(2) $(3)
 #
 # Historical notes:
 #
@@ -234,26 +338,36 @@ DISTCLEAN_FILES += $(bin.stripccomments)
 # c-pp.c was written specifically for the sqlite project's JavaScript
 # builds but is maintained as a standalone project:
 # https://fossil.wanderinghorse.net/r/c-pp
+#
+# Note that the SQLITE_... build flags used here have NO EFFECT on the
+# JS/WASM build. They are solely for use with $(bin.c-pp) itself.
+#
+# -D... flags which should be included in all invocations should be
+# appended to $(C-PP.FILTER.global).
 bin.c-pp := ./c-pp
 $(bin.c-pp): c-pp.c $(sqlite3.c) $(MAKEFILE)
 	$(CC) -O0 -o $@ c-pp.c $(sqlite3.c) '-DCMPP_DEFAULT_DELIM="//#"' -I$(dir.top) \
 		-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_UTF16 \
 		-DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_WAL -DSQLITE_THREADSAFE=0 \
 		-DSQLITE_TEMP_STORE=3
+C-PP.FILTER.global ?=
+ifeq (1,$(SQLITE_C_IS_SEE))
+  C-PP.FILTER.global += -Denable-see
+endif
 define C-PP.FILTER
 # Create $2 from $1 using $(bin.c-pp)
 # $1 = Input file: c-pp -f $(1).js
 # $2 = Output file: c-pp -o $(2).js
 # $3 = optional c-pp -D... flags
 $(2): $(1) $$(MAKEFILE) $$(bin.c-pp)
-	$$(bin.c-pp) -f $(1) -o $$@ $(3)
+	$$(bin.c-pp) -f $(1) -o $$@ $(3) $(C-PP.FILTER.global)
 CLEAN_FILES += $(2)
 endef
 # /end C-PP.FILTER
 ########################################################################
 
 # cflags.common = C compiler flags for all builds
-cflags.common :=  -I. -I.. -I$(dir.top)
+cflags.common :=  -I. -I$(dir $(sqlite3.c))
 # emcc.WASM_BIGINT = 1 for BigInt (C int64) support, else 0.  The API
 # disables certain features if BigInt is not enabled and such builds
 # _are not tested_ on any regular basis.
@@ -294,13 +408,19 @@ emcc_opt_full := $(emcc_opt) -g3
 # -Oz when small deliverable size is a priority.
 ########################################################################
 
+########################################################################
 # EXPORTED_FUNCTIONS.* = files for use with Emscripten's
 # -sEXPORTED_FUNCTION flag.
-EXPORTED_FUNCTIONS.api.in := $(abspath $(dir.api)/EXPORTED_FUNCTIONS.sqlite3-api)
+EXPORTED_FUNCTIONS.api.main := $(abspath $(dir.api)/EXPORTED_FUNCTIONS.sqlite3-api)
+EXPORTED_FUNCTIONS.api.in := $(EXPORTED_FUNCTIONS.api.main)
+ifeq (1,$(SQLITE_C_IS_SEE))
+  EXPORTED_FUNCTIONS.api.in += $(abspath $(dir.api)/EXPORTED_FUNCTIONS.sqlite3-see)
+endif
 EXPORTED_FUNCTIONS.api := $(dir.tmp)/EXPORTED_FUNCTIONS.api
-$(EXPORTED_FUNCTIONS.api): $(EXPORTED_FUNCTIONS.api.in) $(MAKEFILE)
-	cp $(EXPORTED_FUNCTIONS.api.in) $@
+$(EXPORTED_FUNCTIONS.api): $(EXPORTED_FUNCTIONS.api.in) $(sqlite3.c) $(MAKEFILE)
+	cat $(EXPORTED_FUNCTIONS.api.in) > $@
 
+########################################################################
 # sqlite3-license-version.js = generated JS file with the license
 # header and version info.
 sqlite3-license-version.js := $(dir.tmp)/sqlite3-license-version.js
@@ -313,31 +433,46 @@ sqlite3-api-build-version.js := $(dir.tmp)/sqlite3-api-build-version.js
 # sqlite3-api.jses = the list of JS files which make up
 # $(sqlite3-api.js.in), in the order they need to be assembled.
 sqlite3-api.jses := $(sqlite3-license-version.js)
+# sqlite3-api-prologue.js: initial boostrapping bits:
 sqlite3-api.jses += $(dir.api)/sqlite3-api-prologue.js
+# whwhasm.js and jaccwabyt.js: Low-level utils, mostly replacing
+# Emscripten glue:
 sqlite3-api.jses += $(dir.common)/whwasmutil.js
 sqlite3-api.jses += $(dir.jacc)/jaccwabyt.js
+# sqlite3-api-glue.js Glues the previous part together:
 sqlite3-api.jses += $(dir.api)/sqlite3-api-glue.js
+# $(sqlite3-api-build-version.js) = library version info
 sqlite3-api.jses += $(sqlite3-api-build-version.js)
+# sqlite3-api-oo1.js = the oo1 API:
 sqlite3-api.jses += $(dir.api)/sqlite3-api-oo1.js
+# sqlite3-api-worker.js = the Worker1 API:
 sqlite3-api.jses += $(dir.api)/sqlite3-api-worker1.js
-sqlite3-api.jses += $(dir.api)/sqlite3-v-helper.js
+# sqlite3-vfs-helper = helper APIs for VFSes:
+sqlite3-api.jses += $(dir.api)/sqlite3-vfs-helper.c-pp.js
+# sqlite3-vtab-helper = helper APIs for VTABLEs:
+sqlite3-api.jses += $(dir.api)/sqlite3-vtab-helper.c-pp.js
+# sqlite3-vfs-opfs.c-pp.js = the first OPFS VFS:
 sqlite3-api.jses += $(dir.api)/sqlite3-vfs-opfs.c-pp.js
+# sqlite3-vfs-opfs-sahpool.c-pp.js = the second OPFS VFS:
+sqlite3-api.jses += $(dir.api)/sqlite3-vfs-opfs-sahpool.c-pp.js
+# sqlite3-api-cleanup.js = "finalizes" the build and cleans up
+# any extraneous global symbols which are needed temporarily
+# by the previous files.
 sqlite3-api.jses += $(dir.api)/sqlite3-api-cleanup.js
 
-# "External" API files which are part of our distribution
-# but not part of the sqlite3-api.js amalgamation.
+########################################################################
+# SOAP.js is an external API file which is part of our distribution
+# but not part of the sqlite3-api.js amalgamation. It's a component of
+# the first OPFS VFS and necessarily an external file.
 SOAP.js := $(dir.api)/sqlite3-opfs-async-proxy.js
-# COPY_XAPI = a $(call)able function to copy $1 to $(dir.dout), where
-# $1 must be one of the "external" JS API files.
-define COPY_XAPI
-sqlite3-api.ext.jses += $$(dir.dout)/$$(notdir $(1))
-$$(dir.dout)/$$(notdir $(1)): $(1) $$(MAKEFILE)
-	cp $$< $$@
-endef
-$(foreach X,$(SOAP.js),\
-  $(eval $(call COPY_XAPI,$(X))))
-all quick: $(sqlite3-api.ext.jses)
-q: quick
+SOAP.js.bld := $(dir.dout)/$(notdir $(SOAP.js))
+#
+# $(sqlite3-api.ext.jses) = API-related files which are standalone files,
+#   not part of the amalgamation.
+#
+sqlite3-api.ext.jses := $(SOAP.js.bld)
+$(SOAP.js.bld): $(SOAP.js)
+	cp $< $@
 
 ########################################################################
 # $(sqlite3-api*.*js) contain the core library code but not the
@@ -384,7 +519,9 @@ endif
 # emcc flags for .c/.o.
 emcc.cflags :=
 emcc.cflags += -std=c99 -fPIC
-# -------------^^^^^^^^ we need c99 for $(sqlite3-wasm.c).
+# -------------^^^^^^^^ we need c99 for $(sqlite3-wasm.c), primarily
+# for variadic macros and snprintf() to implement
+# sqlite3_wasm_enum_json().
 emcc.cflags += -I. -I$(dir.top)
 ########################################################################
 # emcc flags specific to building .js/.wasm files...
@@ -402,14 +539,26 @@ emcc.exportedRuntimeMethods := \
 emcc.jsflags += $(emcc.exportedRuntimeMethods)
 emcc.jsflags += -sUSE_CLOSURE_COMPILER=0
 emcc.jsflags += -sIMPORTED_MEMORY
-ifeq (3.1.31,$(emcc.version))
-  emcc.jsflags += -sSTRICT_JS=0
-  $(warning Disabling -sSTRICT_JS for emcc $(emcc.version): \
-     https://github.com/emscripten-core/emscripten/issues/18610)
-else
-  emcc.jsflags += -sSTRICT_JS=1
-endif
-emcc.environment := -sENVIRONMENT=web,worker
+emcc.jsflags += -sSTRICT_JS=0
+# STRICT_JS disabled due to:
+#   https://github.com/emscripten-core/emscripten/issues/18610
+# TL;DR: does not work with MODULARIZE or EXPORT_ES6 as of version
+# 3.1.31.  The fix for that in newer emcc's is to throw a built-time
+# error if STRICT_JS is used together with those options.
+
+# emcc.jsflags += -sSTRICT=1
+# -sSTRICT=1 Causes failures about unknown symbols which the build
+# tools should be installing, e.g. __syscall_geteuid32
+
+# -sENVIRONMENT values for the various build modes:
+emcc.environment.vanilla := web,worker
+emcc.environment.bundler-friendly := $(emcc.environment.vanilla)
+emcc.environment.esm := $(emcc.environment.vanilla)
+emcc.environment.node := node
+# Note that adding ",node" to the list for the other builds causes
+# Emscripten to generate code which confuses node: it cannot reliably
+# determine whether the build is for a browser or for node.
+
 ########################################################################
 # -sINITIAL_MEMORY: How much memory we need to start with is governed
 # at least in part by whether -sALLOW_MEMORY_GROWTH is enabled. If so,
@@ -421,10 +570,15 @@ emcc.environment := -sENVIRONMENT=web,worker
 # time with 16mb+ memory and 3X time when starting with 8MB. However,
 # such test results are inconsistent due to browser internals which
 # are opaque to us.
+#
+# 2024-03-04: emsdk 3.1.55 replaces INITIAL_MEMORY with INITIAL_HEAP,
+# but also says (in its changelog): "Note that it is currently not
+# supported in all configurations (#21071)."
+# https://github.com/emscripten-core/emscripten/blob/main/ChangeLog.md
 emcc.jsflags += -sALLOW_MEMORY_GROWTH
-emcc.INITIAL_MEMORY.128 := 13107200
+emcc.INITIAL_MEMORY.128 := 134217728
 emcc.INITIAL_MEMORY.96  := 100663296
-emcc.INITIAL_MEMORY.64  := 64225280
+emcc.INITIAL_MEMORY.64  := 67108864
 emcc.INITIAL_MEMORY.32  := 33554432
 emcc.INITIAL_MEMORY.16  := 16777216
 emcc.INITIAL_MEMORY.8   := 8388608
@@ -441,6 +595,8 @@ emcc.jsflags += -sSTACK_SIZE=512KB
 # ^^^ ACHTUNG: emsdk 3.1.27 reduced the default stack size from 5MB to
 # a mere 64KB, which leads to silent memory corruption via the kvvfs
 # VFS, which requires twice that for its xRead() and xWrite() methods.
+# 2023-03: those methods have since been adapted to use a malloc()'d
+# buffer.
 ########################################################################
 # $(sqlite3.js.init-func) is the name Emscripten assigns our exported
 # module init/load function. This symbol name is hard-coded in
@@ -456,13 +612,14 @@ emcc.jsflags += -sSTACK_SIZE=512KB
 # extern-post-js.js. However...  using a temporary symbol name here
 # and then adding sqlite3InitModule() ourselves results in 2 global
 # symbols: we cannot "delete" the Emscripten-defined
-# $(sqlite3.js.init-func) because it's declared with "var".
+# $(sqlite3.js.init-func) from vanilla builds (as opposed to ESM
+# builds) because it's declared with "var".
 sqlite3.js.init-func := sqlite3InitModule
 emcc.jsflags += -sEXPORT_NAME=$(sqlite3.js.init-func)
 emcc.jsflags += -sGLOBAL_BASE=4096 # HYPOTHETICALLY keep func table indexes from overlapping w/ heap addr.
 #emcc.jsflags += -sSTRICT # fails due to missing __syscall_...()
 #emcc.jsflags += -sALLOW_UNIMPLEMENTED_SYSCALLS
-#emcc.jsflags += -sFILESYSTEM=0 # only for experimentation. sqlite3 needs the FS API
+#emcc.jsflags += -sFILESYSTEM=0 # only for experimentation. fiddle needs the FS API
 #emcc.jsflags += -sABORTING_MALLOC # only for experimentation
 emcc.jsflags += -sALLOW_TABLE_GROWTH
 # ^^^^ -sALLOW_TABLE_GROWTH is required for installing new SQL UDFs
@@ -506,15 +663,25 @@ emcc.jsflags += -sLLD_REPORT_UNDEFINED
 # -g3 debugging info, _huge_.
 ########################################################################
 
+########################################################################
+# $(sqlite3-api-build-version.js) injects the build version info into
+# the bundle in JSON form.
 $(sqlite3-api-build-version.js): $(bin.version-info) $(MAKEFILE)
 	@echo "Making $@..."
 	@{ \
-  echo 'self.sqlite3ApiBootstrap.initializers.push(function(sqlite3){'; \
-	echo -n '  sqlite3.version = '; \
-  $(bin.version-info) --json; \
-  echo ';'; \
-	echo '});'; \
+    echo 'globalThis.sqlite3ApiBootstrap.initializers.push(function(sqlite3){'; \
+    echo -n '  sqlite3.version = '; \
+    $(bin.version-info) --json; \
+    echo ';'; \
+    echo '});'; \
   } > $@
+
+########################################################################
+# $(sqlite3-license-version.js) contains the license header and
+# in-comment build version info.
+#
+# Maintenance reminder: there are awk binaries out there which do not
+# support -e SCRIPT.
 $(sqlite3-license-version.js): $(sqlite3.h) $(sqlite3-license-version-header.js) \
   $(MAKEFILE)
 	@echo "Making $@..."; { \
@@ -522,8 +689,8 @@ $(sqlite3-license-version.js): $(sqlite3.h) $(sqlite3-license-version-header.js)
     echo '/*'; \
     echo '** This code was built from sqlite3 version...'; \
     echo "**"; \
-    awk -e '/define SQLITE_VERSION/{$$1=""; print "**" $$0}' \
-        -e '/define SQLITE_SOURCE_ID/{$$1=""; print "**" $$0}' $(sqlite3.h); \
+    awk '/define SQLITE_VERSION/{$$1=""; print "**" $$0}' $(sqlite3.h); \
+    awk '/define SQLITE_SOURCE_ID/{$$1=""; print "**" $$0}' $(sqlite3.h); \
     echo "**"; \
     echo "** Using the Emscripten SDK version $(emcc.version)."; \
     echo '*/'; \
@@ -532,7 +699,11 @@ $(sqlite3-license-version.js): $(sqlite3.h) $(sqlite3-license-version-header.js)
 ########################################################################
 # --post-js and --pre-js are emcc flags we use to append/prepend JS to
 # the generated emscripten module file. These rules set up the core
-# pre/post files for use by the various builds.
+# pre/post files for use by the various builds. --pre-js is used to
+# inject code which needs to run as part of the pre-WASM-load phase.
+# --post-js injects code which runs after the WASM module is loaded
+# and includes the entirety of the library plus some
+# Emscripten-specific post-bootstrapping code.
 pre-js.js.in := $(dir.api)/pre-js.c-pp.js
 post-js.js.in := $(dir.tmp)/post-js.c-pp.js
 post-jses.js := \
@@ -550,26 +721,49 @@ $(post-js.js.in): $(post-jses.js) $(MAKEFILE)
 
 ########################################################################
 # call-make-pre-post is a $(call)able which creates rules for
-# pre-js-$(1).js. $1 = the base name of the JS file on whose behalf
-# this pre-js is for (one of: sqlite3, sqlite3-wasmfs). $2 is the build
-# mode: one of (vanilla, esm, bundler-friendly).  This sets up
-# --[extern-][pre/post]-js flags in $(pre-post-$(1).flags.$(2)) and
-# dependencies in $(pre-post-$(1).deps.$(2)).
+# pre-js.$(1)-$(2).js. $1 = the base name of the JS file on whose
+# behalf this pre-js is for (one of: $(JS_BUILD_NAMES)). $2 is
+# the build mode: one of $(JS_BUILD_MODES).  This sets up
+# --[extern-][pre/post]-js flags in $(pre-post-$(1)-$(2).flags) and
+# dependencies in $(pre-post-$(1)-$(2).deps). The resulting files get
+# filtered using $(C-PP.FILTER). Any flags necessary for such
+# filtering need to be set in $(c-pp.D.$(1)-$(2)) before $(call)ing
+# this.
+#
+# Maintenance note: a shell script was written to generate these rules
+# with the hope that it would make them more legible and maintainable,
+# but embedding makefile code in another language makes it even less
+# legible than having the level of $(eval) indirection which we have
+# here.
 define call-make-pre-post
-pre-post-$(1).flags.$(2) ?=
-$$(dir.tmp)/pre-js-$(1)-$(2).js: $$(pre-js.js.$(2)) $$(MAKEFILE)
-	cp $$(pre-js.js.$(2)) $$@
+pre-post-$(1)-$(2).flags ?=
+pre-js.js.$(1)-$(2).intermediary := $$(dir.tmp)/pre-js.$(1)-$(2).intermediary.js
+pre-js.js.$(1)-$(2) := $$(dir.tmp)/pre-js.$(1)-$(2).js
+#$$(error $$(pre-js.js.$(1)-$(2).intermediary) $$(pre-js.js.$(1)-$(2)))
+$$(eval $$(call C-PP.FILTER,$$(pre-js.js.in),$$(pre-js.js.$(1)-$(2).intermediary),$$(c-pp.D.$(1)-$(2))))
+post-js.js.$(1)-$(2) := $$(dir.tmp)/post-js.$(1)-$(2).js
+$$(eval $$(call C-PP.FILTER,$$(post-js.js.in),$$(post-js.js.$(1)-$(2)),$$(c-pp.D.$(1)-$(2))))
+extern-post-js.js.$(1)-$(2) := $$(dir.tmp)/extern-post-js.$(1)-$(2).js
+$$(eval $$(call C-PP.FILTER,$$(extern-post-js.js.in),$$(extern-post-js.js.$(1)-$(2)),$$(c-pp.D.$(1)-$(2))))
+pre-post-common.flags.$(1)-$(2) := \
+  $$(pre-post-common.flags) \
+  --post-js=$$(post-js.js.$(1)-$(2)) \
+  --extern-post-js=$$(extern-post-js.js.$(1)-$(2))
+pre-post-jses.$(1)-$(2).deps := $$(pre-post-jses.deps.common) \
+  $$(post-js.js.$(1)-$(2)) $$(extern-post-js.js.$(1)-$(2))
+$$(pre-js.js.$(1)-$(2)): $$(pre-js.js.$(1)-$(2).intermediary) $$(MAKEFILE)
+	cp $$(pre-js.js.$(1)-$(2).intermediary) $$@
 	@if [ sqlite3-wasmfs = $(1) ]; then \
 		echo "delete Module[xNameOfInstantiateWasm] /*for WASMFS build*/;"; \
 	elif [ sqlite3 != $(1) ]; then \
 		echo "Module[xNameOfInstantiateWasm].uri = '$(1).wasm';"; \
 	fi >> $$@
-pre-post-$(1).deps.$(2) := \
-  $$(pre-post-jses.deps.$(2)) \
-  $$(dir.tmp)/pre-js-$(1)-$(2).js
-pre-post-$(1).flags.$(2) += \
-  $$(pre-post-common.flags.$(2)) \
-  --pre-js=$$(dir.tmp)/pre-js-$(1)-$(2).js
+pre-post-$(1)-$(2).deps := \
+  $$(pre-post-jses.$(1)-$(2).deps) \
+  $$(dir.tmp)/pre-js.$(1)-$(2).js
+pre-post-$(1)-$(2).flags += \
+  $$(pre-post-common.flags.$(1)-$(2)) \
+  --pre-js=$$(dir.tmp)/pre-js.$(1)-$(2).js
 endef
 # /post-js and pre-js
 ########################################################################
@@ -579,6 +773,8 @@ endef
 # https://github.com/emscripten-core/emscripten/issues/14383
 sqlite3.wasm := $(dir.dout)/sqlite3.wasm
 sqlite3-wasm.c := $(dir.api)/sqlite3-wasm.c
+sqlite3-wasm.cfiles := $(sqlite3-wasm.c) $(sqlite3_wasm_extra_init.c)
+sqlite3-wasmfs.cfiles := $(sqlite3-wasm.cfiles)
 # sqlite3-wasm.o vs sqlite3-wasm.c: building against the latter
 # (predictably) results in a slightly faster binary. We're close
 # enough to the target speed requirements that the 500ms makes a
@@ -588,7 +784,8 @@ sqlite3-wasm.c := $(dir.api)/sqlite3-wasm.c
 # SQLITE3.xJS.EXPORT-DEFAULT is part of SQLITE3-WASMFS.xJS.RECIPE and
 # SETUP_LIB_BUILD_MODE, factored into a separate piece to avoid code
 # duplication. $1 is 1 if the build mode needs this workaround (esm,
-# bundler-friendly) and 0 if not (vanilla).
+# bundler-friendly, node) and 0 if not (vanilla). $2 must be empty for
+# all builds except sqlite3-wasmfs.mjs, in which case it must be 1.
 #
 # Reminder for ESM builds: even if we use -sEXPORT_ES6=0, emcc _still_
 # adds:
@@ -602,17 +799,25 @@ sqlite3-wasm.c := $(dir.api)/sqlite3-wasm.c
 #
 # Upstream RFE:
 # https://github.com/emscripten-core/emscripten/issues/18237
+#
+# Maintenance reminder: Mac sed works differently than GNU sed, so we
+# use awk instead of sed for this.
 define SQLITE3.xJS.ESM-EXPORT-DEFAULT
 if [ x1 = x$(1) ]; then \
-		echo "Fragile workaround for an Emscripten annoyance. See SQLITE3.xJS.RECIPE."; \
-		sed -i -e '0,/^export default/{/^export default/d;}' $@ || exit $$?; \
-		if ! grep -q '^export default' $@; then \
-			echo "Cannot find export default." 1>&2; \
-			exit 1; \
+		echo "Fragile workaround for emscripten/issues/18237. See SQLITE3.xJS.RECIPE."; \
+		{\
+			awk '/^export default/ && !f{f=1; next} 1' $@ > $@.tmp && mv $@.tmp $@; \
+		} || exit $$?; \
+		if [ x != x$(2) ]; then \
+			if ! grep -q '^export default' $@; then \
+				echo "Cannot find export default." 1>&2; \
+				exit 1; \
+			fi; \
 		fi; \
 fi
 endef
 
+########################################################################
 # extern-post-js* and extern-pre-js* are files for use with
 # Emscripten's --extern-pre-js and --extern-post-js flags.
 extern-pre-js.js := $(dir.api)/extern-pre-js.js
@@ -624,53 +829,63 @@ pre-post-common.flags := \
 # pre-post-jses.deps.* = a list of dependencies for the
 # --[extern-][pre/post]-js files.
 pre-post-jses.deps.common := $(extern-pre-js.js) $(sqlite3-license-version.js)
+
 ########################################################################
 # SETUP_LIB_BUILD_MODE is a $(call)'able which sets up numerous pieces
-# for one of the build modes (vanilla, esm, bundler-friendly).
+# for one of the build modes.
 #
-# $1 = build mode name
-# $2 = 1 for ESM build mode, else 0
-# $3 = resulting sqlite-api JS/MJS file
-# $4 = resulting JS/MJS file
-# $5 = -D... flags for $(bin.c-pp)
-# $6 = emcc -sXYZ flags
+# $1 = one of: $(JS_BUILD_NAMES)
+# $2 = build mode name: one of $(JS_BUILD_MODES)
+# $3 = 1 for ESM build mode, else 0
+# $4 = resulting sqlite-api JS/MJS file
+# $5 = resulting JS/MJS file
+# $6 = -D... flags for $(bin.c-pp)
+# $7 = optional extra flags for emcc
+#
+# Maintenance reminder: be careful not to introduce spaces around args
+# ($1, $2), otherwise string concatenation will malfunction.
+#
+# Before calling this, emcc.environment.$(2) must be set to a value
+# for emcc's -sENVIRONMENT flag.
+#
+# $(cflags.$(1)) and $(cflags.$(1).$(2)) may be defined to append
+# CFLAGS to a given build mode.
+#
+# $(emcc.flags.$(1)) and $(emcc.flags.$(1).$(2)) may be defined to
+# append emcc-specific flags to a given build mode.
 define SETUP_LIB_BUILD_MODE
-$(info Setting up build [$(1)]: $(4))
-c-pp.D.$(1) := $(5)
-pre-js.js.$(1) := $$(dir.api)/pre-js.$(1).js
-$$(eval $$(call C-PP.FILTER,$$(pre-js.js.in),$$(pre-js.js.$(1)),$$(c-pp.D.$(1))))
-post-js.js.$(1) := $$(dir.tmp)/post-js.$(1).js
-$$(eval $$(call C-PP.FILTER,$$(post-js.js.in),$$(post-js.js.$(1)),$$(c-pp.D.$(1))))
-extern-post-js.js.$(1) := $$(dir.tmp)/extern-post-js.$(1).js
-$$(eval $$(call C-PP.FILTER,$$(extern-post-js.js.in),$$(extern-post-js.js.$(1)),$$(c-pp.D.$(1))))
-pre-post-common.flags.$(1) := \
-  $$(pre-post-common.flags) \
-  --post-js=$$(post-js.js.$(1)) \
-  --extern-post-js=$$(extern-post-js.js.$(1))
-pre-post-jses.deps.$(1) := $$(pre-post-jses.deps.common) \
-  $$(post-js.js.$(1)) $$(extern-post-js.js.$(1))
-$$(eval $$(call call-make-pre-post,sqlite3,$(1)))
-emcc.flags.sqlite3.$(1) := $(6)
-$$(eval $$(call C-PP.FILTER, $$(sqlite3-api.js.in), $(3), $(5)))
-$(4): $(3)
-$(4): $(3) $$(MAKEFILE) $$(sqlite3-wasm.c) $$(EXPORTED_FUNCTIONS.api) $$(pre-post-sqlite3.deps.$(1))
+$(info Setting up build [$(1)-$(2)]: $(5))
+c-pp.D.$(1)-$(2) := $(6)
+$$(eval $$(call call-make-pre-post,$(1),$(2)))
+emcc.flags.$(1).$(2) ?=
+emcc.flags.$(1).$(2) += $(7)
+$$(eval $$(call C-PP.FILTER, $$(sqlite3-api.js.in), $(4), $(6)))
+$(5): $(4) $$(MAKEFILE) $$(sqlite3-wasm.cfiles) $$(EXPORTED_FUNCTIONS.api) $$(pre-post-$(1)-$(2).deps)
 	@echo "Building $$@ ..."
 	$$(emcc.bin) -o $$@ $$(emcc_opt_full) $$(emcc.flags) \
     $$(emcc.jsflags) \
-    $$(pre-post-sqlite3.flags.$(1)) $$(emcc.flags.sqlite3.$(1)) \
-    $$(cflags.common) $$(SQLITE_OPT) $$(sqlite3-wasm.c)
-	@$$(call SQLITE3.xJS.ESM-EXPORT-DEFAULT,$(2))
-	@if [ bundler-friendly = $(1) ]; then \
-		echo "Patching $(3) for sqlite3.wasm..."; \
-		rm -f $$(dir.dout)/sqlite3-bundler-friendly.wasm; \
-		sed -i -e 's/sqlite3-bundler-friendly.wasm/sqlite3.wasm/g' $$@ || exit $$$$?; \
-	fi
-	chmod -x $$(sqlite3.wasm)
-	$$(maybe-wasm-strip) $$(sqlite3.wasm)
-	@ls -la $@ $$(sqlite3.wasm)
-all: $(4)
-quick: $(4)
-CLEAN_FILES += $(3) $(4)
+    -sENVIRONMENT=$$(emcc.environment.$(2)) \
+    $$(pre-post-$(1)-$(2).flags) \
+    $$(emcc.flags.$(1)) $$(emcc.flags.$(1).$(2)) \
+    $$(cflags.common) $$(SQLITE_OPT) \
+    $$(cflags.$(1)) $$(cflags.$(1).$(2)) \
+    $$(cflags.wasm_extra_init) $$(sqlite3-wasm.cfiles)
+	@$$(call SQLITE3.xJS.ESM-EXPORT-DEFAULT,$(3))
+	@dotwasm=$$(basename $$@).wasm; \
+	chmod -x $$$$dotwasm; \
+	$(maybe-wasm-strip) $$$$dotwasm; \
+	case $(2) in \
+    bundler-friendly|node) \
+      echo "Patching $$@ for $(1).wasm..."; \
+      rm -f $$$$dotwasm; \
+      dotwasm=; \
+      sed -i -e 's/$(1)-$(2).wasm/$(1).wasm/g' $$@ || exit $$$$?; \
+      ;; \
+	esac; \
+	ls -la $$$$dotwasm $$@
+all: $(5)
+#quick: $(5)
+CLEAN_FILES += $(4) $(5)
 endef
 # ^^^ /SETUP_LIB_BUILD_MODE
 ########################################################################
@@ -680,37 +895,52 @@ sqlite3-api.mjs := $(dir.dout)/sqlite3-api.mjs
 sqlite3.mjs := $(dir.dout)/sqlite3.mjs
 sqlite3-api-bundler-friendly.mjs := $(dir.dout)/sqlite3-api-bundler-friendly.mjs
 sqlite3-bundler-friendly.mjs := $(dir.dout)/sqlite3-bundler-friendly.mjs
-# Maintenance reminder: careful not to introduce spaces around args $1, $2
-#$(info $(call SETUP_LIB_BUILD_MODE,vanilla,0, $(sqlite3-api.js), $(sqlite3.js)))
-$(eval $(call SETUP_LIB_BUILD_MODE,vanilla,0, $(sqlite3-api.js), $(sqlite3.js)))
-$(eval $(call SETUP_LIB_BUILD_MODE,esm,1, $(sqlite3-api.mjs), $(sqlite3.mjs), \
-       -Dtarget=es6-module, -sEXPORT_ES6 -sUSE_ES6_IMPORT_META))
-$(eval $(call SETUP_LIB_BUILD_MODE,bundler-friendly,1,\
+sqlite3-api-node.mjs := $(dir.dout)/sqlite3-api-node.mjs
+sqlite3-node.mjs := $(dir.dout)/sqlite3-node.mjs
+#$(info $(call SETUP_LIB_BUILD_MODE,sqlite3,vanilla,0, $(sqlite3-api.js), $(sqlite3.js)))
+$(eval $(call SETUP_LIB_BUILD_MODE,sqlite3,vanilla,0,\
+         $(sqlite3-api.js), $(sqlite3.js)))
+$(eval $(call SETUP_LIB_BUILD_MODE,sqlite3,esm,1,\
+         $(sqlite3-api.mjs), $(sqlite3.mjs), -Dtarget=es6-module))
+$(eval $(call SETUP_LIB_BUILD_MODE,sqlite3,bundler-friendly,1,\
        $(sqlite3-api-bundler-friendly.mjs),$(sqlite3-bundler-friendly.mjs),\
-       $(c-pp.D.esm) -Dtarget=es6-bundler-friendly, $(emcc.flags.sqlite3.esm)))
+       $(c-pp.D.sqlite3-esm) -Dtarget=es6-bundler-friendly))
+$(eval $(call SETUP_LIB_BUILD_MODE,sqlite3,node,1,\
+       $(sqlite3-api-node.mjs),$(sqlite3-node.mjs),\
+       $(c-pp.D.sqlite3-bundler-friendly) -Dtarget=node))
 # The various -D... values used by *.c-pp.js include:
 #
 # -Dtarget=es6-module: for all ESM module builds
 #
+# -Dtarget=node: for node.js builds
+#
 # -Dtarget=es6-module -Dtarget=es6-bundler-friendly: intended for
 #    "bundler-friendly" ESM module build. These have some restrictions
 #    on how URL() objects are constructed in some contexts: URLs which
-#    refer to files which are part of this project must be references
+#    refer to files which are part of this project must be referenced
 #    as string literals so that bundlers' static-analysis tools can
 #    find those files and include them in their bundles.
 #
+# -Dtarget=es6-module -Dtarget=es6-bundler-friendly -Dtarget=node: is
+#    intended for use by node.js for node.js, as opposed to by
+#    node.js on behalf of a browser. Mixing -sENVIRONMENT=web and
+#    -sENVIRONMENT=node leads to ambiguity and confusion on node's
+#    part, as it's unable to reliably determine whether the target is
+#    a browser or node.
+#
 ########################################################################
 ########################################################################
-# We have to ensure that we do not build both $(sqlite3*.*js) in
-# parallel because both result in the creation of $(sqlite3.wasm). We
-# have no way to build just the .mjs file without also building the
-# .wasm file because the generated .mjs file has to include info about
-# the imports needed by the wasm file, so they have to be built
+# We have to ensure that we do not build $(sqlite3*.*js) in parallel
+# because they all result in the creation of $(sqlite3.wasm). We have
+# no way to build just a .[m]js file without also building the .wasm
+# file because the generated .[m]js file has to include info about the
+# imports needed by the wasm file, so they have to be built
 # together. i.e.  we're building $(sqlite3.wasm) multiple times, but
 # that's unavoidable (and harmless, just a waste of build time).
 $(sqlite3.wasm): $(sqlite3.js)
 $(sqlite3.mjs): $(sqlite3.js)
 $(sqlite3-bundler-friendly.mjs): $(sqlite3.mjs)
+$(sqlite3-node.mjs): $(sqlite3.mjs)
 CLEAN_FILES += $(sqlite3.wasm)
 
 ########################################################################
@@ -723,18 +953,39 @@ sqlite3-worker1.js.in := $(dir.api)/sqlite3-worker1.c-pp.js
 sqlite3-worker1-promiser.js.in := $(dir.api)/sqlite3-worker1-promiser.c-pp.js
 sqlite3-worker1.js := $(dir.dout)/sqlite3-worker1.js
 sqlite3-worker1-promiser.js := $(dir.dout)/sqlite3-worker1-promiser.js
-sqlite3-worker1-bundler-friendly.js := $(dir.dout)/sqlite3-worker1-bundler-friendly.js
+sqlite3-worker1-promiser.mjs := $(dir.dout)/sqlite3-worker1-promiser.mjs
+sqlite3-worker1-bundler-friendly.mjs := $(dir.dout)/sqlite3-worker1-bundler-friendly.mjs
 sqlite3-worker1-promiser-bundler-friendly.js := $(dir.dout)/sqlite3-worker1-promiser-bundler-friendly.js
 $(eval $(call C-PP.FILTER,$(sqlite3-worker1.js.in),$(sqlite3-worker1.js)))
-$(eval $(call C-PP.FILTER,$(sqlite3-worker1.js.in),$(sqlite3-worker1-bundler-friendly.js),\
-    $(c-pp.D.bundler-friendly)))
+$(eval $(call C-PP.FILTER,$(sqlite3-worker1.js.in),$(sqlite3-worker1-bundler-friendly.mjs),\
+    $(c-pp.D.sqlite3-bundler-friendly)))
 $(eval $(call C-PP.FILTER,$(sqlite3-worker1-promiser.js.in),$(sqlite3-worker1-promiser.js)))
 $(eval $(call C-PP.FILTER,$(sqlite3-worker1-promiser.js.in),\
     $(sqlite3-worker1-promiser-bundler-friendly.js),\
-    $(c-pp.D.bundler-friendly)))
-$(sqlite3-bundler-friendly.mjs): $(sqlite3-worker1-bundler-friendly.js) \
+    $(c-pp.D.sqlite3-bundler-friendly)))
+$(eval $(call C-PP.FILTER,$(sqlite3-worker1-promiser.js.in),$(sqlite3-worker1-promiser.mjs),\
+    -Dtarget=es6-module -Dtarget=es6-bundler-friendly))
+$(sqlite3-bundler-friendly.mjs): $(sqlite3-worker1-bundler-friendly.mjs) \
     $(sqlite3-worker1-promiser-bundler-friendly.js)
-$(sqlite3.js) $(sqlite3.mjs): $(sqlite3-worker1.js) $(sqlite3-worker1-promiser.js)
+$(eval $(call C-PP.FILTER,demo-worker1-promiser.c-pp.js,demo-worker1-promiser.js))
+$(eval $(call C-PP.FILTER,demo-worker1-promiser.c-pp.js,demo-worker1-promiser.mjs,\
+    -Dtarget=es6-module))
+$(eval $(call C-PP.FILTER,demo-worker1-promiser.c-pp.html,demo-worker1-promiser.html))
+$(eval $(call C-PP.FILTER,demo-worker1-promiser.c-pp.html,demo-worker1-promiser-esm.html,\
+    -Dtarget=es6-module))
+all: $(sqlite3-worker1.js) \
+    $(sqlite3-worker1-promiser.js) $(sqlite3-worker1-promiser.mjs)
+
+demo-worker1-promiser.html: $(sqlite3-worker1-promiser.js) demo-worker1-promiser.js
+demo-worker1-promiser-esm.html: $(sqlite3-worker1-promiser.mjs) demo-worker1-promiser.mjs
+all: demo-worker1-promiser.html demo-worker1-promiser-esm.html
+
+sqlite3-api.ext.jses += \
+  $(sqlite3-worker1-promiser.mjs) \
+  $(sqlite3-worker1-bundler-friendly.mjs) \
+  $(sqlite3-worker1.js)
+all quick: $(sqlite3-api.ext.jses)
+q: quick
 
 ########################################################################
 # batch-runner.js is part of one of the test apps which reads in SQL
@@ -743,7 +994,7 @@ dir.sql := sql
 speedtest1 := ../../speedtest1
 speedtest1.c := ../../test/speedtest1.c
 speedtest1.sql := $(dir.sql)/speedtest1.sql
-speedtest1.cliflags := --size 25 --big-transactions
+speedtest1.cliflags := --size 10 --big-transactions
 $(speedtest1):
 	$(MAKE) -C ../.. speedtest1
 $(speedtest1.sql): $(speedtest1) $(MAKEFILE)
@@ -757,7 +1008,7 @@ clean-batch:
 # a regular basis with different -Ox flags and rebuilding the batch
 # pieces each time is an unnecessary time sink.
 batch: batch-runner.list
-all: batch
+#all: batch
 # end batch-runner.js
 ########################################################################
 # Wasmified speedtest1 is our primary benchmarking tool.
@@ -765,16 +1016,19 @@ all: batch
 # emcc.speedtest1.common = emcc flags used by multiple builds of speedtest1
 # emcc.speedtest1 = emcc flags used by main build of speedtest1
 emcc.speedtest1.common := $(emcc_opt_full)
-emcc.speedtest1 :=
+emcc.speedtest1 := -I. -I$(dir $(sqlite3.canonical.c))
 emcc.speedtest1 += -sENVIRONMENT=web
 emcc.speedtest1 += -sALLOW_MEMORY_GROWTH
 emcc.speedtest1 += -sINITIAL_MEMORY=$(emcc.INITIAL_MEMORY.$(emcc.INITIAL_MEMORY))
 emcc.speedtest1.common += -sINVOKE_RUN=0
 emcc.speedtest1.common += --no-entry
 emcc.speedtest1.common += -sABORTING_MALLOC
-emcc.speedtest1.common += -sSTRICT_JS
+emcc.speedtest1.common += -sSTRICT_JS=0
 emcc.speedtest1.common += -sMODULARIZE
 emcc.speedtest1.common += -Wno-limited-postlink-optimizations
+emcc.speedtest1.common += -Wno-unused-main
+# ^^^^ -Wno-unused-main is for emcc 3.1.52+. speedtest1 has a wasm_main() which is
+# exported and called by the JS code.
 EXPORTED_FUNCTIONS.speedtest1 := $(abspath $(dir.tmp)/EXPORTED_FUNCTIONS.speedtest1)
 emcc.speedtest1.common += -sSTACK_SIZE=512KB
 emcc.speedtest1.common += -sEXPORTED_FUNCTIONS=@$(EXPORTED_FUNCTIONS.speedtest1)
@@ -803,25 +1057,29 @@ speedtest1.exit-runtime1 := -sEXIT_RUNTIME=1
 # -sEXIT_RUNTIME=1 but we need EXIT_RUNTIME=0 for the worker-based app
 # which runs speedtest1 multiple times.
 
-$(EXPORTED_FUNCTIONS.speedtest1): $(EXPORTED_FUNCTIONS.api)
+$(EXPORTED_FUNCTIONS.speedtest1): $(EXPORTED_FUNCTIONS.api.main)
 	@echo "Making $@ ..."
-	@{ echo _wasm_main; cat $(EXPORTED_FUNCTIONS.api); } > $@
+	@{ echo _wasm_main; cat $(EXPORTED_FUNCTIONS.api.main); } > $@
 speedtest1.js := $(dir.dout)/speedtest1.js
 speedtest1.wasm := $(dir.dout)/speedtest1.wasm
-cflags.speedtest1 := $(cflags.common) -DSQLITE_SPEEDTEST1_WASM
-speedtest1.cses := $(speedtest1.c) $(sqlite3-wasm.c)
+emcc.flags.speedtest1-vanilla := $(cflags.common) -DSQLITE_SPEEDTEST1_WASM
+
+speedtest1.cfiles := $(speedtest1.c) $(sqlite3-wasm.c)
 $(eval $(call call-make-pre-post,speedtest1,vanilla))
-$(speedtest1.js): $(MAKEFILE) $(speedtest1.cses) \
-    $(pre-post-speedtest1.deps.vanilla) \
+$(speedtest1.js): $(MAKEFILE) $(speedtest1.cfiles) \
+    $(pre-post-speedtest1-vanilla.deps) \
     $(EXPORTED_FUNCTIONS.speedtest1)
 	@echo "Building $@ ..."
 	$(emcc.bin) \
-        $(emcc.speedtest1) $(emcc.speedtest1.common) \
-        $(cflags.speedtest1) $(pre-post-speedtest1.flags.vanilla) \
+        $(emcc.speedtest1) \
+        $(emcc.speedtest1.common) \
+        $(emcc.flags.speedtest1-vanilla) $(pre-post-speedtest1-vanilla.flags) \
         $(SQLITE_OPT) \
+        -USQLITE_C -DSQLITE_C=$(sqlite3.canonical.c) \
         $(speedtest1.exit-runtime0) \
-        -o $@ $(speedtest1.cses) -lm
+        -o $@ $(speedtest1.cfiles) -lm
 	$(maybe-wasm-strip) $(speedtest1.wasm)
+	chmod -x $(speedtest1.wasm)
 	ls -la $@ $(speedtest1.wasm)
 
 speedtest1: $(speedtest1.js)
@@ -847,13 +1105,14 @@ CLEAN_FILES += $(speedtest1.js) $(speedtest1.wasm)
 #
 # To create those, we filter tester1.c-pp.js with $(bin.c-pp)...
 $(eval $(call C-PP.FILTER,tester1.c-pp.js,tester1.js))
-$(eval $(call C-PP.FILTER,tester1.c-pp.js,tester1.mjs,$(c-pp.D.esm)))
+$(eval $(call C-PP.FILTER,tester1.c-pp.js,tester1.mjs,$(c-pp.D.sqlite3-esm)))
 $(eval $(call C-PP.FILTER,tester1.c-pp.html,tester1.html))
-$(eval $(call C-PP.FILTER,tester1.c-pp.html,tester1-esm.html,$(c-pp.D.esm)))
+$(eval $(call C-PP.FILTER,tester1.c-pp.html,tester1-esm.html,$(c-pp.D.sqlite3-esm)))
 tester1: tester1.js tester1.mjs tester1.html tester1-esm.html
 # Note that we do not include $(sqlite3-bundler-friendly.mjs) in this
 # because bundlers are client-specific.
 all quick: tester1
+quick: $(sqlite3.js)
 
 ########################################################################
 # Convenience rules to rebuild with various -Ox levels. Much
@@ -873,8 +1132,6 @@ o1: clean
 	$(MAKE) -e "emcc_opt=-O1 $(o-xtra)"
 o2: clean
 	$(MAKE) -j2 -e "emcc_opt=-O2 $(o-xtra)"
-qo2: clean
-	$(MAKE) -j2 -e "emcc_opt=-O2 $(o-xtra)" quick
 o3: clean
 	$(MAKE) -e "emcc_opt=-O3 $(o-xtra)"
 os: clean
@@ -882,8 +1139,6 @@ os: clean
 	$(MAKE) -e "emcc_opt=-Os $(o-xtra)"
 oz: clean
 	$(MAKE) -j2 -e "emcc_opt=-Oz $(o-xtra)"
-qoz: clean
-	$(MAKE) -j2 -e "emcc_opt=-Oz $(o-xtra)" quick
 
 ########################################################################
 # Sub-makes...
@@ -895,6 +1150,8 @@ include fiddle.make
 ifneq (,$(filter wasmfs,$(MAKECMDGOALS)))
 wasmfs.enable ?= 1
 else
+# Unconditionally enable wasmfs for [dist]clean so that the wasmfs
+# sub-make can clean up.
 wasmfs.enable ?= $(if $(filter %clean,$(MAKECMDGOALS)),1,0)
 endif
 ifeq (1,$(wasmfs.enable))
@@ -925,8 +1182,7 @@ endif
 # Push files to public wasm-testing.sqlite.org server
 wasm-testing.include = *.js *.mjs *.html \
   ./tests \
-  batch-runner.list \
-  $(dir.dout) $(dir.sql) $(dir.common) $(dir.fiddle) $(dir.jacc)
+  $(dir.dout) $(dir.common) $(dir.fiddle) $(dir.jacc)
 wasm-testing.exclude = sql/speedtest1.sql
 wasm-testing.dir     = /jail/sites/wasm-testing
 wasm-testing.dest   ?= wasm-testing:$(wasm-testing.dir)
@@ -974,4 +1230,4 @@ endif
 
 # Run local web server for the test/demo pages.
 httpd:
-	althttpd -max-age 1 -enable-sab -page index.html
+	althttpd -max-age 1 -enable-sab 1 -page index.html

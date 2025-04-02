@@ -45,8 +45,8 @@
    Intended usage:
 
    ```
-   self.WhWasmUtilInstaller(appObject);
-   delete self.WhWasmUtilInstaller;
+   globalThis.WhWasmUtilInstaller(appObject);
+   delete globalThis.WhWasmUtilInstaller;
    ```
 
    Its global-scope symbol is intended only to provide an easy way to
@@ -111,7 +111,8 @@
      of `target.instance` (a WebAssembly.Module instance) and it must
      contain the symbols exported by the WASM module associated with
      this code. In an Enscripten environment it must be set to
-     `Module['asm']`. The exports object must contain a minimum of the
+     `Module['asm']` (versions <=3.1.43) or `wasmExports` (versions
+     >=3.1.44). The exports object must contain a minimum of the
      following symbols:
 
      - `memory`: a WebAssembly.Memory object representing the WASM
@@ -171,10 +172,10 @@
 
    https://fossil.wanderinghorse.net/r/jaccwabbyt/file/common/whwasmutil.js
 */
-self.WhWasmUtilInstaller = function(target){
+globalThis.WhWasmUtilInstaller = function(target){
   'use strict';
   if(undefined===target.bigIntEnabled){
-    target.bigIntEnabled = !!self['BigInt64Array'];
+    target.bigIntEnabled = !!globalThis['BigInt64Array'];
   }
 
   /** Throws a new Error, the message of which is the concatenation of
@@ -355,8 +356,8 @@ self.WhWasmUtilInstaller = function(target){
           break;
         default:
           if(target.bigIntEnabled){
-            if(n===self['BigUint64Array']) return c.HEAP64U;
-            else if(n===self['BigInt64Array']) return c.HEAP64;
+            if(n===globalThis['BigUint64Array']) return c.HEAP64U;
+            else if(n===globalThis['BigInt64Array']) return c.HEAP64;
             break;
           }
     }
@@ -612,8 +613,6 @@ self.WhWasmUtilInstaller = function(target){
   target.installFunction = (func, sig)=>__installFunction(func, sig, false);
 
   /**
-     EXPERIMENTAL! DO NOT USE IN CLIENT CODE!
-
      Works exactly like installFunction() but requires that a
      scopedAllocPush() is active and uninstalls the given function
      when that alloc scope is popped via scopedAllocPop().
@@ -1179,7 +1178,7 @@ self.WhWasmUtilInstaller = function(target){
     cache.scopedAlloc.splice(n,1);
     for(let p; (p = state.pop()); ){
       if(target.functionEntry(p)){
-        //console.warn("scopedAllocPop() uninstalling transient function",p);
+        //console.warn("scopedAllocPop() uninstalling function",p);
         target.uninstallFunction(p);
       }
       else target.dealloc(p);
@@ -1383,15 +1382,19 @@ self.WhWasmUtilInstaller = function(target){
      conversion of argument or return types, but see xWrap() and
      xCallWrapped() for variants which do.
 
+     If the first argument is a function is is assumed to be
+     a WASM-bound function and is used as-is instead of looking up
+     the function via xGet().
+
      As a special case, if passed only 1 argument after the name and
      that argument in an Array, that array's entries become the
      function arguments. (This is not an ambiguous case because it's
      not legal to pass an Array object to a WASM function.)
   */
   target.xCall = function(fname, ...args){
-    const f = target.xGet(fname);
+    const f = (fname instanceof Function) ? fname : target.xGet(fname);
     if(!(f instanceof Function)) toss("Exported symbol",fname,"is not a function.");
-    if(f.length!==args.length) __argcMismatch(fname,f.length)
+    if(f.length!==args.length) __argcMismatch(((f===fname) ? f.name : fname),f.length)
     /* This is arguably over-pedantic but we want to help clients keep
        from shooting themselves in the foot when calling C APIs. */;
     return (2===arguments.length && Array.isArray(arguments[1]))
@@ -1538,7 +1541,7 @@ self.WhWasmUtilInstaller = function(target){
        jsFuncToWasm().
 
      - bindScope (string): one of ('transient', 'context',
-       'singleton'). Bind scopes are:
+       'singleton', 'permanent'). Bind scopes are:
 
        - 'transient': it will convert JS functions to WASM only for
          the duration of the xWrap()'d function call, using
@@ -1636,6 +1639,7 @@ self.WhWasmUtilInstaller = function(target){
                      'and is not intended to be invoked from',
                      'client-level code. Invoked with:',opt);
       }
+      this.name = opt.name || "unnamed";
       this.signature = opt.signature;
       if(opt.contextKey instanceof Function){
         this.contextKey = opt.contextKey;
@@ -1656,25 +1660,11 @@ self.WhWasmUtilInstaller = function(target){
         ? opt.callProxy : undefined;
     }
 
-    /** If true, the constructor emits a warning. The intent is that
-        this be set to true after bootstrapping of the higher-level
-        client library is complete, to warn downstream clients that
-        they shouldn't be relying on this implemenation detail which
-        does not have a stable interface. */
-    static warnOnUse = false;
-
-    /** If true, convertArg() will FuncPtrAdapter.debugOut() when it
-        (un)installs a function binding to/from WASM. Note that
-        deinstallation of bindScope=transient bindings happens
-        via scopedAllocPop() so will not be output. */
-    static debugFuncInstall = false;
-
-    /** Function used for debug output. */
-    static debugOut = console.debug.bind(console);
-
-    static bindScopes = [
-      'transient', 'context', 'singleton', 'permanent'
-    ];
+    /**
+       Note that static class members are defined outside of the class
+       to work around an emcc toolchain build problem: one of the
+       tools in emsdk v3.1.42 does not support the static keyword.
+    */
 
     /* Dummy impl. Overwritten per-instance as needed. */
     contextKey(argv,argIndex){
@@ -1711,14 +1701,16 @@ self.WhWasmUtilInstaller = function(target){
        exactly the 2nd and 3rd arguments are.
     */
     convertArg(v,argv,argIndex){
-      //FuncPtrAdapter.debugOut("FuncPtrAdapter.convertArg()",this.signature,this.transient,v);
+      //FuncPtrAdapter.debugOut("FuncPtrAdapter.convertArg()",this.name,this.signature,this.transient,v);
       let pair = this.singleton;
       if(!pair && this.isContext){
         pair = this.contextMap(this.contextKey(argv,argIndex));
+        //FuncPtrAdapter.debugOut(this.name, this.signature, "contextKey() =",this.contextKey(argv,argIndex), pair);
       }
       if(pair && pair[0]===v) return pair[1];
       if(v instanceof Function){
         /* Install a WASM binding and return its pointer. */
+        //FuncPtrAdapter.debugOut("FuncPtrAdapter.convertArg()",this.name,this.signature,this.transient,v,pair);
         if(this.callProxy) v = this.callProxy(v);
         const fp = __installFunction(v, this.signature, this.isTransient);
         if(FuncPtrAdapter.debugFuncInstall){
@@ -1732,7 +1724,18 @@ self.WhWasmUtilInstaller = function(target){
               FuncPtrAdapter.debugOut("FuncPtrAdapter uninstalling", this,
                                       this.contextKey(argv,argIndex), '@'+pair[1], v);
             }
-            try{target.uninstallFunction(pair[1])}
+            try{
+              /* Because the pending native call might rely on the
+                 pointer we're replacing, e.g. as is normally the case
+                 with sqlite3's xDestroy() methods, we don't
+                 immediately uninstall but instead add its pointer to
+                 the scopedAlloc stack, which will be cleared when the
+                 xWrap() mechanism is done calling the native
+                 function. We're relying very much here on xWrap()
+                 having pushed an alloc scope.
+              */
+              cache.scopedAlloc[cache.scopedAlloc.length-1].push(pair[1]);
+            }
             catch(e){/*ignored*/}
           }
           pair[0] = v;
@@ -1740,13 +1743,14 @@ self.WhWasmUtilInstaller = function(target){
         }
         return fp;
       }else if(target.isPtr(v) || null===v || undefined===v){
+        //FuncPtrAdapter.debugOut("FuncPtrAdapter.convertArg()",this.name,this.signature,this.transient,v,pair);
         if(pair && pair[1] && pair[1]!==v){
           /* uninstall stashed mapping and replace stashed mapping with v. */
           if(FuncPtrAdapter.debugFuncInstall){
             FuncPtrAdapter.debugOut("FuncPtrAdapter uninstalling", this,
                                     this.contextKey(argv,argIndex), '@'+pair[1], v);
           }
-          try{target.uninstallFunction(pair[1])}
+          try{ cache.scopedAlloc[cache.scopedAlloc.length-1].push(pair[1]) }
           catch(e){/*ignored*/}
           pair[0] = pair[1] = (v | 0);
         }
@@ -1761,17 +1765,55 @@ self.WhWasmUtilInstaller = function(target){
     }/*convertArg()*/
   }/*FuncPtrAdapter*/;
 
+  /** If true, the constructor emits a warning. The intent is that
+      this be set to true after bootstrapping of the higher-level
+      client library is complete, to warn downstream clients that
+      they shouldn't be relying on this implemenation detail which
+      does not have a stable interface. */
+  xArg.FuncPtrAdapter.warnOnUse = false;
+
+  /** If true, convertArg() will FuncPtrAdapter.debugOut() when it
+      (un)installs a function binding to/from WASM. Note that
+      deinstallation of bindScope=transient bindings happens
+      via scopedAllocPop() so will not be output. */
+  xArg.FuncPtrAdapter.debugFuncInstall = false;
+
+  /** Function used for debug output. */
+  xArg.FuncPtrAdapter.debugOut = console.debug.bind(console);
+
+  xArg.FuncPtrAdapter.bindScopes = [
+    'transient', 'context', 'singleton', 'permanent'
+  ];
+
   const __xArgAdapterCheck =
         (t)=>xArg.get(t) || toss("Argument adapter not found:",t);
 
   const __xResultAdapterCheck =
         (t)=>xResult.get(t) || toss("Result adapter not found:",t);
 
+  /**
+     Fetches the xWrap() argument adapter mapped to t, calls it,
+     passing in all remaining arguments, and returns the result.
+     Throws if t is not mapped to an argument converter.
+  */
   cache.xWrap.convertArg = (t,...args)=>__xArgAdapterCheck(t)(...args);
+  /**
+     Identical to convertArg() except that it does not perform
+     an is-defined check on the mapping to t before invoking it.
+  */
   cache.xWrap.convertArgNoCheck = (t,...args)=>xArg.get(t)(...args);
 
+  /**
+     Fetches the xWrap() result adapter mapped to t, calls it, passing
+     it v, and returns the result.  Throws if t is not mapped to an
+     argument converter.
+  */
   cache.xWrap.convertResult =
     (t,v)=>(null===t ? v : (t ? __xResultAdapterCheck(t)(v) : undefined));
+  /**
+     Identical to convertResult() except that it does not perform an
+     is-defined check on the mapping to t before invoking it.
+  */
   cache.xWrap.convertResultNoCheck =
     (t,v)=>(null===t ? v : (t ? xResult.get(t)(v) : undefined));
 
@@ -1883,15 +1925,15 @@ self.WhWasmUtilInstaller = function(target){
        const C-string, encoded as UTF-8, copies it to a JS string,
        and returns that JS string.
 
-     - `string:dealloc` or `utf8:dealloc) (results): treats the result value
-       as a non-const UTF-8 C-string, ownership of which has just been
-       transfered to the caller. It copies the C-string to a JS
-       string, frees the C-string, and returns the JS string. If such
-       a result value is NULL, the JS result is `null`. Achtung: when
-       using an API which returns results from a specific allocator,
-       e.g. `my_malloc()`, this conversion _is not legal_. Instead, an
-       equivalent conversion which uses the appropriate deallocator is
-       required. For example:
+     - `string:dealloc` or `utf8:dealloc` (results): treats the result
+       value as a non-const UTF-8 C-string, ownership of which has
+       just been transfered to the caller. It copies the C-string to a
+       JS string, frees the C-string, and returns the JS string. If
+       such a result value is NULL, the JS result is `null`. Achtung:
+       when using an API which returns results from a specific
+       allocator, e.g. `my_malloc()`, this conversion _is not
+       legal_. Instead, an equivalent conversion which uses the
+       appropriate deallocator is required. For example:
 
 ```js
    target.xWrap.resultAdapter('string:my_free',(i)=>{
@@ -1992,8 +2034,12 @@ self.WhWasmUtilInstaller = function(target){
           arguments may be passed in after that one, and what those
           arguments are, is _not_ part of the public interface and is
           _not_ stable.
+
+          Maintenance reminder: the Ember framework modifies the core
+          Array type, breaking for-in loops.
         */
-        for(const i in args) args[i] = cxw.convertArgNoCheck(
+        let i = 0;
+        for(; i < args.length; ++i) args[i] = cxw.convertArgNoCheck(
           argTypes[i], args[i], args, i
         );
         return cxw.convertResultNoCheck(resultType, xf.apply(null,args));
@@ -2194,7 +2240,7 @@ self.WhWasmUtilInstaller = function(target){
    Error handling is up to the caller, who may attach a `catch()` call
    to the promise.
 */
-self.WhWasmUtilInstaller.yawl = function(config){
+globalThis.WhWasmUtilInstaller.yawl = function(config){
   const wfetch = ()=>fetch(config.uri, {credentials: 'same-origin'});
   const wui = this;
   const finalThen = function(arg){
@@ -2240,4 +2286,4 @@ self.WhWasmUtilInstaller.yawl = function(config){
             .then(finalThen);
         };
   return loadWasm;
-}.bind(self.WhWasmUtilInstaller)/*yawl()*/;
+}.bind(globalThis.WhWasmUtilInstaller)/*yawl()*/;

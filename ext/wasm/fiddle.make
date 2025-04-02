@@ -9,16 +9,18 @@ MAKEFILE.fiddle := $(lastword $(MAKEFILE_LIST))
 # shell.c and its build flags...
 make-np-0 := make -C  $(dir.top) -n -p
 make-np-1 := sed -e 's/(TOP)/(dir.top)/g'
+# Extract SHELL_OPT and SHELL_DEP from the top-most makefile and import
+# them as vars here...
 $(eval $(shell $(make-np-0) | grep -e '^SHELL_OPT ' | $(make-np-1)))
-$(eval $(shell $(make-np-0) | grep -e '^SHELL_SRC ' | $(make-np-1)))
+$(eval $(shell $(make-np-0) | grep -e '^SHELL_DEP ' | $(make-np-1)))
 # ^^^ can't do that in 1 invocation b/c newlines get stripped
 ifeq (,$(SHELL_OPT))
 $(error Could not parse SHELL_OPT from $(dir.top)/Makefile.)
 endif
-ifeq (,$(SHELL_SRC))
-$(error Could not parse SHELL_SRC from $(dir.top)/Makefile.)
+ifeq (,$(SHELL_DEP))
+$(error Could not parse SHELL_DEP from $(dir.top)/Makefile.)
 endif
-$(dir.top)/shell.c: $(SHELL_SRC) $(dir.top)/tool/mkshellc.tcl
+$(dir.top)/shell.c: $(SHELL_DEP) $(dir.top)/tool/mkshellc.tcl $(sqlite3.c)
 	$(MAKE) -C $(dir.top) shell.c
 # /shell.c
 ########################################################################
@@ -29,7 +31,7 @@ fiddle.emcc-flags = \
   --minify 0 \
   -sALLOW_TABLE_GROWTH \
   -sABORTING_MALLOC \
-  -sSTRICT_JS \
+  -sSTRICT_JS=0 \
   -sENVIRONMENT=web,worker \
   -sMODULARIZE \
   -sDYNAMIC_EXECUTION=0 \
@@ -61,9 +63,9 @@ $(fiddle.SOAP.js): $(SOAP.js)
 $(eval $(call call-make-pre-post,fiddle-module,vanilla))
 $(fiddle-module.js): $(MAKEFILE) $(MAKEFILE.fiddle) \
     $(EXPORTED_FUNCTIONS.fiddle) \
-    $(fiddle.cses) $(pre-post-fiddle-module.deps.vanilla) $(fiddle.SOAP.js)
+    $(fiddle.cses) $(pre-post-fiddle-module-vanilla.deps) $(fiddle.SOAP.js)
 	$(emcc.bin) -o $@ $(fiddle.emcc-flags) \
-    $(pre-post-fiddle-module.flags.vanilla) \
+    $(pre-post-fiddle-module-vanilla.flags) \
     $(fiddle.cses)
 	$(maybe-wasm-strip) $(fiddle-module.wasm)
 	gzip < $@ > $@.gz
