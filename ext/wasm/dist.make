@@ -19,10 +19,15 @@ MAKEFILE.dist := $(lastword $(MAKEFILE_LIST))
 # built, and won't be built until we expand the dependencies. Thus we
 # have to use a temporary name for the archive until we can get
 # that binary built.
-ifeq (,$(filter snapshot,$(MAKECMDGOALS)))
-dist-name-prefix := sqlite-wasm
+ifeq (1,$(SQLITE_C_IS_SEE))
+dist-name-extra := -see
 else
-dist-name-prefix := sqlite-wasm-snapshot-$(shell /usr/bin/date +%Y%m%d)
+dist-name-extra :=
+endif
+ifeq (,$(filter snapshot,$(MAKECMDGOALS)))
+dist-name-prefix := sqlite-wasm$(dist-name-extra)
+else
+dist-name-prefix := sqlite-wasm$(dist-name-extra)-snapshot-$(shell /usr/bin/date +%Y%m%d)
 endif
 dist-name := $(dist-name-prefix)-TEMP
 
@@ -38,7 +43,7 @@ dist-name := $(dist-name-prefix)-TEMP
 # date. Our general policy is that we want the smallest binaries for
 # dist zip files, so use the oz build unless there is a compelling
 # reason not to.
-dist.build ?= qoz
+dist.build ?= oz
 
 dist-dir.top := $(dist-name)
 dist-dir.jswasm := $(dist-dir.top)/$(notdir $(dir.dout))
@@ -49,12 +54,18 @@ dist.top.extras := \
     tester1.js tester1.mjs \
     demo-jsstorage.html demo-jsstorage.js \
     demo-worker1.html demo-worker1.js \
-    demo-worker1-promiser.html demo-worker1-promiser.js
-dist.jswasm.extras := $(sqlite3-api.ext.jses) $(sqlite3.wasm)
+    demo-worker1-promiser.html demo-worker1-promiser.js \
+    demo-worker1-promiser-esm.html demo-worker1-promiser.mjs
+dist.jswasm.extras := $(sqlite3.wasm) \
+  $(sqlite3-api.ext.jses)
 dist.common.extras := \
     $(wildcard $(dir.common)/*.css) \
     $(dir.common)/SqliteTestUtil.js
 
+#$(info sqlite3-worker1-promiser.mjs = $(sqlite3-worker1-promiser.mjs))
+#$(info sqlite3-worker1.js = $(sqlite3-worker1.js))
+#$(info sqlite3-api.ext.jses = $(sqlite3-api.ext.jses))
+#$(info dist.jswasm.extras = $(dist.jswasm.extras))
 .PHONY: dist snapshot
 # DIST_STRIP_COMMENTS $(call)able to be used in stripping C-style
 # from the dist copies of certain files.
@@ -67,10 +78,12 @@ endef
 # STRIP_K1.js = list of JS files which need to be passed through
 # $(bin.stripcomments) with a single -k flag.
 STRIP_K1.js := $(sqlite3-worker1.js) $(sqlite3-worker1-promiser.js) \
-  $(sqlite3-worker1-bundler-friendly.js) $(sqlite3-worker1-promiser-bundler-friendly.js)
+  $(sqlite3-worker1-bundler-friendly.js) \
+  $(sqlite3-api.ext.jses)
 # STRIP_K2.js = list of JS files which need to be passed through
 # $(bin.stripcomments) with two -k flags.
-STRIP_K2.js := $(sqlite3.js) $(sqlite3.mjs) $(sqlite3-bundler-friendly.mjs)
+STRIP_K2.js := $(sqlite3.js) $(sqlite3.mjs) \
+  $(sqlite3-bundler-friendly.mjs) $(sqlite3-node.mjs)
 ########################################################################
 # dist: create the end-user deliverable archive.
 #
@@ -87,6 +100,7 @@ STRIP_K2.js := $(sqlite3.js) $(sqlite3.mjs) $(sqlite3-bundler-friendly.mjs)
 dist: \
     $(bin.stripccomments) $(bin.version-info) \
     $(dist.build) $(STRIP_K1.js) $(STRIP_K2.js) \
+    $(dist.jswasm.extras) $(dist.common.extras) \
     $(MAKEFILE) $(MAKEFILE.dist)
 	@echo "Making end-user deliverables..."
 	@rm -fr $(dist-dir.top)
