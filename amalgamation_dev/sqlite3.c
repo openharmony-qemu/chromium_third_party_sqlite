@@ -20,9 +20,6 @@
 ** The content in this amalgamation comes from Fossil check-in
 ** 05187da8936e631b5ba6b6af8dba383a9fa6 with changes in files:
 **
-**    ext/fts3/fts3.c
-**    ext/fts3/fts3Int.h
-**    ext/fts3/fts3_snippet.c
 **    manifest.uuid
 */
 #define SQLITE_CORE 1
@@ -466,7 +463,7 @@ extern "C" {
 */
 #define SQLITE_VERSION        "3.46.0"
 #define SQLITE_VERSION_NUMBER 3046000
-#define SQLITE_SOURCE_ID      "2024-05-23 13:25:27 05187da8936e631b5ba6b6af8dba383a9fa6968273051622cca09c6396bfalt1"
+#define SQLITE_SOURCE_ID      "2024-05-23 13:25:27 05187da8936e631b5ba6b6af8dba383a9fa6968273051622cca09c6396bf9603"
 
 /*
 ** CAPI3REF: Run-Time Library Version Numbers
@@ -186448,7 +186445,6 @@ SQLITE_PRIVATE int sqlite3Fts3MsrIncrNext(
 SQLITE_PRIVATE int sqlite3Fts3EvalPhrasePoslist(Fts3Cursor *, Fts3Expr *, int iCol, char **);
 SQLITE_PRIVATE int sqlite3Fts3MsrOvfl(Fts3Cursor *, Fts3MultiSegReader *, int *);
 SQLITE_PRIVATE int sqlite3Fts3MsrIncrRestart(Fts3MultiSegReader *pCsr);
-SQLITE_PRIVATE int sqlite3Fts3MsrCancel(Fts3Cursor*, Fts3Expr*);
 
 /* fts3_tokenize_vtab.c */
 SQLITE_PRIVATE int sqlite3Fts3InitTok(sqlite3*, Fts3Hash *, void(*xDestroy)(void*));
@@ -191960,24 +191956,6 @@ static void fts3EvalRestart(
     fts3EvalRestart(pCsr, pExpr->pLeft, pRc);
     fts3EvalRestart(pCsr, pExpr->pRight, pRc);
   }
-}
-
-/*
-** Expression node pExpr is an MSR phrase. This function restarts pExpr
-** so that it is a regular phrase query, not an MSR. SQLITE_OK is returned
-** if successful, or an SQLite error code otherwise.
-*/
-SQLITE_PRIVATE int sqlite3Fts3MsrCancel(Fts3Cursor *pCsr, Fts3Expr *pExpr){
-  int rc = SQLITE_OK;
-  if( pExpr->bEof==0 ){
-    i64 iDocid = pExpr->iDocid;
-    fts3EvalRestart(pCsr, pExpr, &rc);
-    while( rc==SQLITE_OK && pExpr->iDocid!=iDocid ){
-      fts3EvalNextRow(pCsr, pExpr, &rc);
-      if( pExpr->bEof ) rc = FTS_CORRUPT_VTAB;
-    }
-  }
-  return rc;
 }
 
 /*
@@ -203378,16 +203356,16 @@ static size_t fts3MatchinfoSize(MatchInfo *pInfo, char cArg){
       break;
 
     case FTS3_MATCHINFO_LHITS:
-      nVal = (size_t)pInfo->nCol * pInfo->nPhrase;
+      nVal = pInfo->nCol * pInfo->nPhrase;
       break;
 
     case FTS3_MATCHINFO_LHITS_BM:
-      nVal = (size_t)pInfo->nPhrase * ((pInfo->nCol + 31) / 32);
+      nVal = pInfo->nPhrase * ((pInfo->nCol + 31) / 32);
       break;
 
     default:
       assert( cArg==FTS3_MATCHINFO_HITS );
-      nVal = (size_t)pInfo->nCol * pInfo->nPhrase * 3;
+      nVal = pInfo->nCol * pInfo->nPhrase * 3;
       break;
   }
 
@@ -203942,21 +203920,6 @@ static int fts3ExprTermOffsetInit(Fts3Expr *pExpr, int iPhrase, void *ctx){
 }
 
 /*
-** If expression pExpr is a phrase expression that uses an MSR query,
-** restart it as a regular, non-incremental query. Return SQLITE_OK
-** if successful, or an SQLite error code otherwise.
-*/
-static int fts3ExprRestartIfCb(Fts3Expr *pExpr, int iPhrase, void *ctx){
-  TermOffsetCtx *p = (TermOffsetCtx*)ctx;
-  int rc = SQLITE_OK;
-  if( pExpr->pPhrase && pExpr->pPhrase->bIncr ){
-    rc = sqlite3Fts3MsrCancel(p->pCsr, pExpr);
-    pExpr->pPhrase->bIncr = 0;
-  }
-  return rc;
-}
-
-/*
 ** Implementation of offsets() function.
 */
 SQLITE_PRIVATE void sqlite3Fts3Offsets(
@@ -203991,12 +203954,6 @@ SQLITE_PRIVATE void sqlite3Fts3Offsets(
   }
   sCtx.iDocid = pCsr->iPrevId;
   sCtx.pCsr = pCsr;
-
-  /* If a query restart will be required, do it here, rather than later of
-  ** after pointers to poslist buffers that may be invalidated by a restart
-  ** have been saved.  */
-  rc = sqlite3Fts3ExprIterate(pCsr->pExpr, fts3ExprRestartIfCb, (void*)&sCtx);
-  if( rc!=SQLITE_OK ) goto offsets_out;
 
   /* Loop through the table columns, appending offset information to
   ** string-buffer res for each column.
