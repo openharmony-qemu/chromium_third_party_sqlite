@@ -23,6 +23,7 @@
 **    ext/fts3/fts3.c
 **    ext/fts3/fts3Int.h
 **    ext/fts3/fts3_snippet.c
+**    src/bitvec.c
 **    manifest.uuid
 */
 #define SQLITE_CORE 1
@@ -54025,7 +54026,9 @@ bitvec_set_rehash:
     }else{
       memcpy(aiValues, p->u.aHash, sizeof(p->u.aHash));
       memset(p->u.apSub, 0, sizeof(p->u.apSub));
-      p->iDivisor = (p->iSize + BITVEC_NPTR - 1)/BITVEC_NPTR;
+      p->iDivisor = p->iSize/BITVEC_NPTR;
+      if( (p->iSize%BITVEC_NPTR)!=0 ) p->iDivisor++;
+      if( p->iDivisor<BITVEC_NBIT ) p->iDivisor = BITVEC_NBIT;
       rc = sqlite3BitvecSet(p, i);
       for(j=0; j<BITVEC_NINT; j++){
         if( aiValues[j] ) rc |= sqlite3BitvecSet(p, aiValues[j]);
