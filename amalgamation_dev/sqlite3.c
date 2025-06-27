@@ -454,7 +454,7 @@ extern "C" {
 */
 #define SQLITE_VERSION        "3.41.2"
 #define SQLITE_VERSION_NUMBER 3041002
-#define SQLITE_SOURCE_ID      "2023-03-22 11:56:21 c5a8ed5442668c558f8330bc68beb9e9e6396526f364a63f7a6cb812639aff78"
+#define SQLITE_SOURCE_ID      "2023-03-22 11:56:21 c5a8ed5442668c558f8330bc68beb9e9e6396526f364a63f7a6cb812639aalt1"
 
 /*
 ** CAPI3REF: Run-Time Library Version Numbers
@@ -162783,7 +162783,10 @@ SQLITE_PRIVATE WhereInfo *sqlite3WhereBegin(
 
   /* An ORDER/GROUP BY clause of more than 63 terms cannot be optimized */
   testcase( pOrderBy && pOrderBy->nExpr==BMS-1 );
-  if( pOrderBy && pOrderBy->nExpr>=BMS ) pOrderBy = 0;
+  if( pOrderBy && pOrderBy->nExpr>=BMS ){
+    pOrderBy = 0;
+    wctrlFlags &= ~WHERE_WANT_DISTINCT;
+  }
 
   /* The number of tables in the FROM clause is limited by the number of
   ** bits in a Bitmask
@@ -219235,15 +219238,19 @@ static int sessionReadRecord(
         }
       }
       if( eType==SQLITE_INTEGER || eType==SQLITE_FLOAT ){
-        sqlite3_int64 v = sessionGetI64(aVal);
-        if( eType==SQLITE_INTEGER ){
-          sqlite3VdbeMemSetInt64(apOut[i], v);
+        if( (pIn->nData-pIn->iNext)<8 ){
+          rc = SQLITE_CORRUPT_BKPT;
         }else{
-          double d;
-          memcpy(&d, &v, 8);
-          sqlite3VdbeMemSetDouble(apOut[i], d);
+          sqlite3_int64 v = sessionGetI64(aVal);
+          if( eType==SQLITE_INTEGER ){
+            sqlite3VdbeMemSetInt64(apOut[i], v);
+          }else{
+            double d;
+            memcpy(&d, &v, 8);
+            sqlite3VdbeMemSetDouble(apOut[i], d);
+          }
+          pIn->iNext += 8;
         }
-        pIn->iNext += 8;
       }
     }
   }
