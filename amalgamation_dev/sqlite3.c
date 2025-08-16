@@ -23,6 +23,7 @@
 **    ext/fts3/fts3.c
 **    ext/fts3/fts3Int.h
 **    ext/fts3/fts3_snippet.c
+**    ext/fts5/fts5_expr.c
 **    src/bitvec.c
 **    manifest.uuid
 */
@@ -238748,7 +238749,8 @@ static void sqlite3Fts5ParseSetDistance(
               );
           return;
         }
-        nNear = nNear * 10 + (p->p[i] - '0');
+        if( nNear<214748363 ) nNear = nNear * 10 + (p->p[i] - '0');
+        /*  ^^^^^^^^^^^^^^^---  Prevent integer overflow */
       }
     }else{
       nNear = FTS5_DEFAULT_NEARDIST;
