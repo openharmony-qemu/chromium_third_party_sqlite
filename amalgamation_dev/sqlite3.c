@@ -186445,6 +186445,7 @@ SQLITE_PRIVATE int sqlite3Fts3MsrIncrNext(
 SQLITE_PRIVATE int sqlite3Fts3EvalPhrasePoslist(Fts3Cursor *, Fts3Expr *, int iCol, char **);
 SQLITE_PRIVATE int sqlite3Fts3MsrOvfl(Fts3Cursor *, Fts3MultiSegReader *, int *);
 SQLITE_PRIVATE int sqlite3Fts3MsrIncrRestart(Fts3MultiSegReader *pCsr);
+SQLITE_PRIVATE int sqlite3Fts3MsrCancel(Fts3Cursor*, Fts3Expr*);
 
 /* fts3_tokenize_vtab.c */
 SQLITE_PRIVATE int sqlite3Fts3InitTok(sqlite3*, Fts3Hash *, void(*xDestroy)(void*));
@@ -191956,6 +191957,24 @@ static void fts3EvalRestart(
     fts3EvalRestart(pCsr, pExpr->pLeft, pRc);
     fts3EvalRestart(pCsr, pExpr->pRight, pRc);
   }
+}
+
+/*
+** Expression node pExpr is an MSR phrase. This function restarts pExpr
+** so that it is a regular phrase query, not an MSR. SQLITE_OK is returned
+** if successful, or an SQLite error code otherwise.
+*/
+SQLITE_PRIVATE int sqlite3Fts3MsrCancel(Fts3Cursor *pCsr, Fts3Expr *pExpr){
+  int rc = SQLITE_OK;
+  if( pExpr->bEof==0 ){
+    i64 iDocid = pExpr->iDocid;
+    fts3EvalRestart(pCsr, pExpr, &rc);
+    while( rc==SQLITE_OK && pExpr->iDocid!=iDocid ){
+      fts3EvalNextRow(pCsr, pExpr, &rc);
+      if( pExpr->bEof ) rc = FTS_CORRUPT_VTAB;
+    }
+  }
+  return rc;
 }
 
 /*
@@ -203920,6 +203939,21 @@ static int fts3ExprTermOffsetInit(Fts3Expr *pExpr, int iPhrase, void *ctx){
 }
 
 /*
+** If expression pExpr is a phrase expression that uses an MSR query,
+** restart it as a regular, non-incremental query. Return SQLITE_OK
+** if successful, or an SQLite error code otherwise.
+*/
+static int fts3ExprRestartIfCb(Fts3Expr *pExpr, int iPhrase, void *ctx){
+  TermOffsetCtx *p = (TermOffsetCtx*)ctx;
+  int rc = SQLITE_OK;
+  if( pExpr->pPhrase && pExpr->pPhrase->bIncr ){
+    rc = sqlite3Fts3MsrCancel(p->pCsr, pExpr);
+    pExpr->pPhrase->bIncr = 0;
+  }
+  return rc;
+}
+
+/*
 ** Implementation of offsets() function.
 */
 SQLITE_PRIVATE void sqlite3Fts3Offsets(
@@ -203954,6 +203988,12 @@ SQLITE_PRIVATE void sqlite3Fts3Offsets(
   }
   sCtx.iDocid = pCsr->iPrevId;
   sCtx.pCsr = pCsr;
+
+  /* If a query restart will be required, do it here, rather than later of
+  ** after pointers to poslist buffers that may be invalidated by a restart
+  ** have been saved.  */
+  rc = sqlite3Fts3ExprIterate(pCsr->pExpr, fts3ExprRestartIfCb, (void*)&sCtx);
+  if( rc!=SQLITE_OK ) goto offsets_out;
 
   /* Loop through the table columns, appending offset information to
   ** string-buffer res for each column.
