@@ -1,0 +1,11 @@
+[
+    {
+        "Name": "sqlite",
+        "License": "blessing",
+        "License File": "LICENSE.md",
+        "Version Number": "567495a62a62dc013888500526e82837d727fe01",
+        "Owner": "huamengzheng@huawei.com",
+        "Upstream URL": "https://chromium.googlesource.com/chromium/deps/sqlite.git@567495a62a62dc013888500526e82837d727fe01",
+        "Description": "第三方软件sqlite，一个进程内的库，实现了自给自足的、无服务器的、零配置的、事务性的 SQL 数据库引擎"
+    }
+]
